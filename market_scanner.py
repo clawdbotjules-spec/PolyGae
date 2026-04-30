@@ -104,11 +104,15 @@ class MarketScanner:
     def fee_rate_for(category: str) -> float:
         return _FEE_RATES.get(_normalise_category(category), _DEFAULT_FEE_RATE)
 
+    async def _ensure_session(self) -> None:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30),
+                headers={"User-Agent": "NewsTraderBot/1.0"},
+            )
+
     async def start(self) -> None:
-        self._session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30),
-            headers={"User-Agent": "NewsTraderBot/1.0"},
-        )
+        await self._ensure_session()
         # initial scan
         try:
             await self._scan_once()
@@ -146,6 +150,7 @@ class MarketScanner:
                 log.error("market_scan_failed", error=str(e), exc_info=True)
 
     async def _scan_once(self) -> None:
+        await self._ensure_session()
         markets = await self._fetch_all_markets()
         kept: dict[str, MarketSnapshot] = {}
         filtered_volume = filtered_resolution = filtered_spread = filtered_paused = 0
@@ -324,6 +329,7 @@ class MarketScanner:
             return list(self._cache.values())
 
     async def refresh_single_market(self, condition_id: str) -> MarketSnapshot | None:
+        await self._ensure_session()
         assert self._session is not None
         url = f"{POLYMARKET_GAMMA_HOST}/markets"
         params = {"condition_ids": condition_id}

@@ -69,7 +69,12 @@ async def _health_checks(
         await market_scanner._scan_once()  # noqa: SLF001 - single-call check
         log.info("health_gamma_ok")
     except Exception as e:
-        log.error("health_gamma_failed", error=str(e))
+        log.error(
+            "health_gamma_failed",
+            error=repr(e),
+            error_type=type(e).__name__,
+            exc_info=True,
+        )
         ok = False
 
     # Telegram fire-and-forget; failure is logged but not fatal
