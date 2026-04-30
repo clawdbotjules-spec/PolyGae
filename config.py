@@ -110,6 +110,15 @@ POSITION_MONITOR_INTERVAL_SECONDS: Final[int] = _get_int("POSITION_MONITOR_INTER
 HEARTBEAT_INTERVAL_SECONDS: Final[int] = _get_int("HEARTBEAT_INTERVAL_SECONDS", 5)
 ORDER_FILL_TIMEOUT_SECONDS: Final[int] = _get_int("ORDER_FILL_TIMEOUT_SECONDS", 90)
 
+# --- Claude call gating ---
+# Hard ceiling on how often we hit Anthropic. Free / Tier 1 is ~5 RPM for Opus.
+MAX_CLAUDE_CALLS_PER_MINUTE: Final[int] = _get_int("MAX_CLAUDE_CALLS_PER_MINUTE", 4)
+# When True, we only send articles to Claude when their text overlaps with
+# at least one keyword extracted from active market questions.
+RELEVANCE_FILTER_ENABLED: Final[bool] = _get_bool("RELEVANCE_FILTER_ENABLED", True)
+# Cap on markets included in each Claude prompt.
+MAX_MARKETS_IN_PROMPT: Final[int] = _get_int("MAX_MARKETS_IN_PROMPT", 80)
+
 # --- Misc ---
 ARTICLE_BODY_MAX_WORDS: Final[int] = _get_int("ARTICLE_BODY_MAX_WORDS", 800)
 LOG_DB_PATH: Final[str] = _get_str("LOG_DB_PATH", "newstrader.db")
@@ -157,6 +166,9 @@ def safe_summary() -> dict[str, object]:
         "min_edge_after_fees": MIN_EDGE_AFTER_FEES,
         "max_spread_cents": MAX_SPREAD_CENTS,
         "news_staleness_max_minutes": NEWS_STALENESS_MAX_MINUTES,
+        "max_claude_calls_per_minute": MAX_CLAUDE_CALLS_PER_MINUTE,
+        "relevance_filter_enabled": RELEVANCE_FILTER_ENABLED,
+        "max_markets_in_prompt": MAX_MARKETS_IN_PROMPT,
         "claude_model": CLAUDE_MODEL,
         "clob_host": POLYMARKET_CLOB_HOST,
         "gamma_host": POLYMARKET_GAMMA_HOST,

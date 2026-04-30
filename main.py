@@ -21,6 +21,7 @@ from market_scanner import MarketScanner
 from models import NewsArticle
 from news_engine import NewsEngine
 from position_monitor import PositionMonitor
+from relevance_filter import RelevanceFilter
 from risk_manager import RiskManager
 
 
@@ -87,6 +88,21 @@ async def _health_checks(
     return ok
 
 
+async def _refresh_relevance_keywords(
+    relevance: RelevanceFilter,
+    market_scanner: MarketScanner,
+    interval_s: int = 300,
+) -> None:
+    """Periodically rebuild the keyword set from currently-cached markets."""
+    while True:
+        try:
+            markets = await market_scanner.list_markets()
+            relevance.update_keywords([m.question for m in markets])
+        except Exception as e:
+            log.warning("relevance_refresh_failed", error=str(e))
+        await asyncio.sleep(interval_s)
+
+
 async def _process_news(
     news_queue: asyncio.Queue[NewsArticle],
     analyst: ClaudeAnalyst,
@@ -95,6 +111,7 @@ async def _process_news(
     executor: Executor,
     position_monitor: PositionMonitor,
     trade_logger: TradeLogger,
+    relevance: RelevanceFilter,
     session_state: dict,
 ) -> None:
     while True:
@@ -111,6 +128,28 @@ async def _process_news(
                 await trade_logger.log_article(article, "skipped_safety")
                 continue
 
+            # Cheap pre-filter: does this article share a keyword with any
+            # currently-active market question? If not, save the tokens.
+            if not relevance.is_relevant(article.headline, article.body):
+                await trade_logger.log_article(article, "skipped_irrelevant")
+                log.debug(
+                    "article_skipped_irrelevant",
+                    source=article.source,
+                    headline=article.headline[:80],
+                )
+                continue
+
+            # Hard rate-limit on Claude calls so we never trip 429.
+            if not relevance.can_call_now():
+                await trade_logger.log_article(article, "skipped_rate_limit")
+                log.info(
+                    "article_skipped_rate_limit",
+                    calls_in_last_minute=relevance.calls_in_last_minute,
+                    max_per_min=relevance.max_calls_per_minute,
+                    headline=article.headline[:80],
+                )
+                continue
+
             session_context = {
                 "session_start": session_state["session_start"].isoformat(),
                 "trades_this_session": session_state["trades_this_session"],
@@ -121,8 +160,11 @@ async def _process_news(
                 "daily_pnl": risk_manager.daily_pnl_usdc,
             }
 
-            markets_str = await market_scanner.get_markets_for_prompt()
+            markets_str = await market_scanner.get_markets_for_prompt(
+                max_markets=config.MAX_MARKETS_IN_PROMPT
+            )
 
+            relevance.record_call()
             t0 = time.monotonic()
             try:
                 decision = await analyst.analyze(article, markets_str, session_context)
@@ -293,6 +335,10 @@ async def amain() -> int:
         logger=trade_logger,
     )
     news_engine = NewsEngine(queue=news_queue, trade_logger=trade_logger)
+    relevance = RelevanceFilter(
+        max_calls_per_minute=config.MAX_CLAUDE_CALLS_PER_MINUTE,
+        enable_relevance=config.RELEVANCE_FILTER_ENABLED,
+    )
 
     log.info("startup", config=config.safe_summary())
 
@@ -313,6 +359,10 @@ async def amain() -> int:
         asyncio.create_task(executor.heartbeat_loop(), name="heartbeat"),
         asyncio.create_task(position_monitor.start(), name="position_monitor"),
         asyncio.create_task(
+            _refresh_relevance_keywords(relevance, market_scanner),
+            name="relevance_refresh",
+        ),
+        asyncio.create_task(
             _process_news(
                 news_queue,
                 analyst,
@@ -321,6 +371,7 @@ async def amain() -> int:
                 executor,
                 position_monitor,
                 trade_logger,
+                relevance,
                 session_state,
             ),
             name="news_processor",
