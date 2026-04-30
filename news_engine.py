@@ -1,9 +1,14 @@
 """Multi-source news ingestion engine.
 
 Pushes normalised NewsArticle objects onto an asyncio.Queue. Sources:
-  1. Newsfilter.io WebSocket (real-time)
+  1. Newsfilter.io WebSocket (real-time, optional — only enabled when an
+     API key is configured)
   2. NewsAPI.org polling (top-headlines + everything)
-  3. RSS feeds (Reuters, AP, BBC, Politico, WaPo)
+  3. The Guardian Open API polling (free, near-real-time)
+  4. GDELT 2.0 DOC API polling (free, no key, ~15-min lag)
+  5. Marketaux polling (free tier — financial news)
+  6. Reddit JSON polling (free, no key — r/worldnews etc.)
+  7. RSS feeds (Reuters, AP, BBC, Politico, WaPo)
 
 Deduplication is keyed on SHA-256(url + headline). Articles older than
 NEWS_STALENESS_MAX_MINUTES at receipt are dropped.
@@ -24,9 +29,14 @@ import websockets
 
 from config import (
     ARTICLE_BODY_MAX_WORDS,
+    GDELT_QUERY,
+    GUARDIAN_API_KEY,
+    MARKETAUX_API_KEY,
     NEWSAPI_KEY,
     NEWSFILTER_API_KEY,
     NEWS_STALENESS_MAX_MINUTES,
+    REDDIT_SUBREDDITS,
+    REDDIT_USER_AGENT,
 )
 from logger import TradeLogger
 from models import NewsArticle
@@ -140,13 +150,30 @@ class NewsEngine:
             timeout=aiohttp.ClientTimeout(total=30),
             headers={"User-Agent": "NewsTraderBot/1.0"},
         )
-        self._tasks = [
-            asyncio.create_task(self._run_newsfilter_ws(), name="newsfilter_ws"),
-            asyncio.create_task(self._run_newsapi(), name="newsapi"),
-            asyncio.create_task(self._run_rss(), name="rss"),
-            asyncio.create_task(self._run_pruner(), name="dedup_pruner"),
-        ]
-        log.info("news_engine_started", sources=len(self._tasks))
+        self._tasks = []
+        # Newsfilter WS only if a key is configured (otherwise it just spams
+        # SSL handshake errors).
+        if NEWSFILTER_API_KEY:
+            self._tasks.append(
+                asyncio.create_task(self._run_newsfilter_ws(), name="newsfilter_ws")
+            )
+        self._tasks.append(asyncio.create_task(self._run_newsapi(), name="newsapi"))
+        if GUARDIAN_API_KEY:
+            self._tasks.append(
+                asyncio.create_task(self._run_guardian(), name="guardian")
+            )
+        self._tasks.append(asyncio.create_task(self._run_gdelt(), name="gdelt"))
+        if MARKETAUX_API_KEY:
+            self._tasks.append(
+                asyncio.create_task(self._run_marketaux(), name="marketaux")
+            )
+        self._tasks.append(asyncio.create_task(self._run_reddit(), name="reddit"))
+        self._tasks.append(asyncio.create_task(self._run_rss(), name="rss"))
+        self._tasks.append(asyncio.create_task(self._run_pruner(), name="dedup_pruner"))
+        log.info(
+            "news_engine_started",
+            sources=[t.get_name() for t in self._tasks if not t.get_name().startswith("dedup")],
+        )
         try:
             await asyncio.gather(*self._tasks)
         except asyncio.CancelledError:
@@ -357,6 +384,295 @@ class NewsEngine:
             published_at=published,
             url=url,
             categories=[],
+        )
+
+    # --- The Guardian Open API ----------------------------------------------
+
+    async def _run_guardian(self) -> None:
+        if not GUARDIAN_API_KEY:
+            return
+        url = "https://content.guardianapis.com/search"
+        params_base = {
+            "api-key": GUARDIAN_API_KEY,
+            "order-by": "newest",
+            "page-size": 50,
+            "show-fields": "trailText,bodyText,standfirst",
+        }
+        # Free tier is 12k/day. 30s polling = ~2.9k/day, comfortable margin.
+        while not self._stop.is_set():
+            try:
+                await self._poll_guardian(url, params_base)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("guardian_poll_failed", error=str(e))
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _poll_guardian(self, url: str, params: dict[str, Any]) -> None:
+        assert self._session is not None
+        async with self._session.get(url, params=params) as resp:
+            if resp.status != 200:
+                txt = await resp.text()
+                log.warning("guardian_non_200", status=resp.status, body=txt[:200])
+                return
+            data = await resp.json()
+        results = (data.get("response") or {}).get("results", []) or []
+        for entry in results:
+            article = self._parse_guardian_entry(entry)
+            if article is not None:
+                await self._emit(article)
+
+    def _parse_guardian_entry(self, entry: dict[str, Any]) -> NewsArticle | None:
+        title = (entry.get("webTitle") or "").strip()
+        url = (entry.get("webUrl") or "").strip()
+        if not title or not url:
+            return None
+        published = _parse_dt(entry.get("webPublicationDate")) or _utcnow()
+        fields = entry.get("fields") or {}
+        body_parts = [
+            fields.get("standfirst") or "",
+            fields.get("trailText") or "",
+            fields.get("bodyText") or "",
+        ]
+        body = "\n".join(p for p in body_parts if p).strip()
+        section = entry.get("sectionId") or entry.get("sectionName") or ""
+        return NewsArticle(
+            id=_make_id(url, title),
+            headline=title,
+            body=_truncate_words(body, ARTICLE_BODY_MAX_WORDS),
+            source="The Guardian",
+            published_at=published,
+            url=url,
+            categories=[str(section)] if section else [],
+        )
+
+    # --- GDELT 2.0 DOC API --------------------------------------------------
+
+    async def _run_gdelt(self) -> None:
+        url = "https://api.gdeltproject.org/api/v2/doc/doc"
+        # GDELT 2.0 publishes new articles every 15 min; poll every 5 min so
+        # we get fresh data shortly after each publish window.
+        while not self._stop.is_set():
+            try:
+                await self._poll_gdelt(url)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("gdelt_poll_failed", error=str(e))
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=300)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _poll_gdelt(self, url: str) -> None:
+        assert self._session is not None
+        params = {
+            "query": GDELT_QUERY + " sourcelang:eng",
+            "mode": "ArtList",
+            "format": "json",
+            "timespan": "30min",
+            "maxrecords": 75,
+            "sort": "DateDesc",
+        }
+        async with self._session.get(url, params=params) as resp:
+            if resp.status != 200:
+                txt = await resp.text()
+                log.warning("gdelt_non_200", status=resp.status, body=txt[:200])
+                return
+            try:
+                data = await resp.json(content_type=None)
+            except Exception as e:
+                log.warning("gdelt_invalid_json", error=str(e))
+                return
+        for entry in data.get("articles") or []:
+            article = self._parse_gdelt_entry(entry)
+            if article is not None:
+                await self._emit(article)
+
+    def _parse_gdelt_entry(self, entry: dict[str, Any]) -> NewsArticle | None:
+        title = (entry.get("title") or "").strip()
+        url = (entry.get("url") or "").strip()
+        if not title or not url:
+            return None
+        # GDELT timestamps look like "20260430T200000Z"
+        seen = entry.get("seendate") or ""
+        published: datetime | None = None
+        if isinstance(seen, str) and len(seen) >= 15:
+            try:
+                published = datetime.strptime(seen[:15], "%Y%m%dT%H%M%S").replace(
+                    tzinfo=timezone.utc
+                )
+            except ValueError:
+                published = None
+        if published is None:
+            published = _utcnow()
+        domain = entry.get("domain") or ""
+        return NewsArticle(
+            id=_make_id(url, title),
+            headline=title,
+            # GDELT does not include article bodies — headline-only signal.
+            body="",
+            source=f"GDELT/{domain}" if domain else "GDELT",
+            published_at=published,
+            url=url,
+            categories=[],
+        )
+
+    # --- Marketaux ----------------------------------------------------------
+
+    async def _run_marketaux(self) -> None:
+        if not MARKETAUX_API_KEY:
+            return
+        url = "https://api.marketaux.com/v1/news/all"
+        # Free tier: 100 calls/day = one every ~14.4 min. Use 16 min to leave
+        # a small margin; 90 calls/day.
+        while not self._stop.is_set():
+            try:
+                await self._poll_marketaux(url)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("marketaux_poll_failed", error=str(e))
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=960)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _poll_marketaux(self, url: str) -> None:
+        assert self._session is not None
+        params = {
+            "api_token": MARKETAUX_API_KEY,
+            "language": "en",
+            "limit": 50,
+            "filter_entities": "true",
+        }
+        async with self._session.get(url, params=params) as resp:
+            if resp.status != 200:
+                txt = await resp.text()
+                log.warning("marketaux_non_200", status=resp.status, body=txt[:200])
+                return
+            data = await resp.json()
+        for entry in data.get("data") or []:
+            article = self._parse_marketaux_entry(entry)
+            if article is not None:
+                await self._emit(article)
+
+    def _parse_marketaux_entry(self, entry: dict[str, Any]) -> NewsArticle | None:
+        title = (entry.get("title") or "").strip()
+        url = (entry.get("url") or "").strip()
+        if not title or not url:
+            return None
+        published = _parse_dt(entry.get("published_at")) or _utcnow()
+        body_parts = [entry.get("description") or "", entry.get("snippet") or ""]
+        body = "\n".join(p for p in body_parts if p).strip()
+        source = entry.get("source") or "Marketaux"
+        entities = entry.get("entities") or []
+        symbols = [
+            e.get("symbol") for e in entities if isinstance(e, dict) and e.get("symbol")
+        ]
+        return NewsArticle(
+            id=_make_id(url, title),
+            headline=title,
+            body=_truncate_words(body, ARTICLE_BODY_MAX_WORDS),
+            source=str(source),
+            published_at=published,
+            url=url,
+            categories=[str(s) for s in symbols][:5],
+        )
+
+    # --- Reddit JSON --------------------------------------------------------
+
+    async def _run_reddit(self) -> None:
+        subs = [s.strip() for s in REDDIT_SUBREDDITS.split(",") if s.strip()]
+        if not subs:
+            return
+        # Reddit's unauthenticated rate limit is ~10 req/min. Per-sub interval
+        # is 60s so total is len(subs) per minute.
+        while not self._stop.is_set():
+            for sub in subs:
+                if self._stop.is_set():
+                    break
+                try:
+                    await self._poll_reddit(sub)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    log.warning("reddit_poll_failed", subreddit=sub, error=str(e))
+                # Stagger sub polls so we never hit the 10/min cap
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=12)
+                except asyncio.TimeoutError:
+                    pass
+
+    async def _poll_reddit(self, subreddit: str) -> None:
+        assert self._session is not None
+        url = f"https://www.reddit.com/r/{subreddit}/new.json"
+        params = {"limit": 25}
+        headers = {"User-Agent": REDDIT_USER_AGENT}
+        async with self._session.get(url, params=params, headers=headers) as resp:
+            if resp.status == 429:
+                log.warning("reddit_rate_limited", subreddit=subreddit)
+                return
+            if resp.status != 200:
+                txt = await resp.text()
+                log.warning(
+                    "reddit_non_200",
+                    subreddit=subreddit,
+                    status=resp.status,
+                    body=txt[:200],
+                )
+                return
+            data = await resp.json()
+        children = ((data.get("data") or {}).get("children")) or []
+        for child in children:
+            entry = child.get("data") if isinstance(child, dict) else None
+            if not isinstance(entry, dict):
+                continue
+            article = self._parse_reddit_entry(entry, subreddit)
+            if article is not None:
+                await self._emit(article)
+
+    def _parse_reddit_entry(
+        self, entry: dict[str, Any], subreddit: str
+    ) -> NewsArticle | None:
+        title = (entry.get("title") or "").strip()
+        if not title:
+            return None
+        # Prefer the linked article URL over the reddit thread URL when the
+        # post is a link submission. is_self=True means a text post — those
+        # rarely contain breaking news, so we skip them.
+        if entry.get("is_self"):
+            return None
+        if entry.get("over_18"):
+            return None
+        url = (entry.get("url") or entry.get("url_overridden_by_dest") or "").strip()
+        if not url:
+            return None
+        # Reject Reddit's own URLs — they're not real news outlets.
+        lowered = url.lower()
+        if "reddit.com" in lowered or "redd.it" in lowered:
+            return None
+        created = entry.get("created_utc")
+        try:
+            published = (
+                datetime.fromtimestamp(float(created), tz=timezone.utc)
+                if created is not None
+                else _utcnow()
+            )
+        except (TypeError, ValueError):
+            published = _utcnow()
+        body = entry.get("selftext") or ""
+        return NewsArticle(
+            id=_make_id(url, title),
+            headline=title,
+            body=_truncate_words(str(body), ARTICLE_BODY_MAX_WORDS),
+            source=f"Reddit/r/{subreddit}",
+            published_at=published,
+            url=url,
+            categories=[subreddit],
         )
 
     # --- RSS polling ---------------------------------------------------------

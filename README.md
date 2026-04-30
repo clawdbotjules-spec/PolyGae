@@ -66,14 +66,33 @@ $EDITOR .env  # populate every variable
 
 ## Where to get each API key
 
-| Provider           | URL                                                                 |
-|--------------------|---------------------------------------------------------------------|
-| Anthropic          | https://console.anthropic.com/                                      |
-| Polymarket (CLOB)  | https://docs.polymarket.com/  (CLOB authentication & API creation) |
-| Newsfilter.io      | https://newsfilter.io/api                                           |
-| NewsAPI.org        | https://newsapi.org/register                                        |
-| Telegram bot       | DM `@BotFather` on Telegram                                         |
-| Telegram chat ID   | DM `@userinfobot` to find your numeric chat ID                      |
+| Provider                     | Required? | URL                                                                 |
+|------------------------------|-----------|---------------------------------------------------------------------|
+| Anthropic                    | yes       | https://console.anthropic.com/                                      |
+| Polymarket (CLOB)            | yes       | https://docs.polymarket.com/  (CLOB authentication & API creation)  |
+| NewsAPI.org                  | yes       | https://newsapi.org/register                                        |
+| Telegram bot                 | yes       | DM `@BotFather` on Telegram                                         |
+| Telegram chat ID             | yes       | DM `@userinfobot` to find your numeric chat ID                      |
+| The Guardian Open API        | optional  | https://open-platform.theguardian.com/access/  (12,000/day, free)   |
+| Marketaux                    | optional  | https://www.marketaux.com/account/dashboard    (100/day, free)      |
+| Newsfilter.io                | optional  | https://newsfilter.io/api  (real-time WebSocket; paid)              |
+
+Reddit and GDELT do not require keys.
+
+### News sources at a glance
+
+The bot polls multiple sources concurrently. None are individually required —
+NewsAPI is the only mandatory source. Adding more keys widens coverage.
+
+| Source       | Real-time? | Cadence | Cost                | Coverage                 |
+|--------------|------------|---------|---------------------|--------------------------|
+| NewsAPI      | ~1 min     | 60s     | Free 100/day        | General                  |
+| Guardian     | seconds    | 30s     | Free 12k/day        | World, politics, finance |
+| GDELT 2.0    | 15-min lag | 5 min   | Free, no key        | Global event monitoring  |
+| Marketaux    | seconds    | 16 min  | Free 100/day        | Financial / markets      |
+| Reddit       | seconds    | 12s/sub | Free, no key        | Breaking, social-driven  |
+| RSS feeds    | minutes    | 90s     | Free, no key        | Reuters, AP, BBC, etc.   |
+| Newsfilter   | seconds    | live WS | Paid                | Wire-style breaking news |
 
 ## Funding your Polymarket wallet
 

@@ -65,8 +65,21 @@ POLYMARKET_CLOB_HOST: Final[str] = _get_str("POLYMARKET_CLOB_HOST", "https://clo
 POLYMARKET_GAMMA_HOST: Final[str] = _get_str("POLYMARKET_GAMMA_HOST", "https://gamma-api.polymarket.com")
 
 # --- News providers ---
-NEWSFILTER_API_KEY: Final[str] = _get_str("NEWSFILTER_API_KEY", required=True)
+# Newsfilter is now optional; if blank the WebSocket source is disabled.
+NEWSFILTER_API_KEY: Final[str] = _get_str("NEWSFILTER_API_KEY", "")
 NEWSAPI_KEY: Final[str] = _get_str("NEWSAPI_KEY", required=True)
+GUARDIAN_API_KEY: Final[str] = _get_str("GUARDIAN_API_KEY", "")
+MARKETAUX_API_KEY: Final[str] = _get_str("MARKETAUX_API_KEY", "")
+REDDIT_USER_AGENT: Final[str] = _get_str(
+    "REDDIT_USER_AGENT", "NewsTraderBot/1.0 (+https://github.com/clawdbotjules-spec/polygae)"
+)
+REDDIT_SUBREDDITS: Final[str] = _get_str(
+    "REDDIT_SUBREDDITS", "worldnews,news,politics,Economics,business"
+)
+GDELT_QUERY: Final[str] = _get_str(
+    "GDELT_QUERY",
+    "(politics OR election OR war OR ceasefire OR fed OR inflation OR \"central bank\" OR sanctions)",
+)
 
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN: Final[str] = _get_str("TELEGRAM_BOT_TOKEN", required=True)
@@ -109,7 +122,6 @@ _REQUIRED_VARS: tuple[tuple[str, str], ...] = (
     ("POLYMARKET_API_SECRET", POLYMARKET_API_SECRET),
     ("POLYMARKET_API_PASSPHRASE", POLYMARKET_API_PASSPHRASE),
     ("POLYMARKET_FUNDER_ADDRESS", POLYMARKET_FUNDER_ADDRESS),
-    ("NEWSFILTER_API_KEY", NEWSFILTER_API_KEY),
     ("NEWSAPI_KEY", NEWSAPI_KEY),
     ("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN),
     ("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID),

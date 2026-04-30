@@ -232,3 +232,167 @@ async def test_emit_dedupes_repeat_articles():
     await eng._emit(art)
     await eng._emit(art)
     assert eng.queue.qsize() == 1
+
+
+# --- Guardian -----------------------------------------------------------
+
+def test_parse_guardian_entry_basic():
+    eng = _make_engine()
+    entry = {
+        "webTitle": "Senate confirms Fed Chair",
+        "webUrl": "https://www.theguardian.com/world/article",
+        "webPublicationDate": "2026-04-30T12:00:00Z",
+        "sectionId": "world",
+        "fields": {
+            "standfirst": "stand",
+            "trailText": "trail",
+            "bodyText": "Long body text here...",
+        },
+    }
+    art = eng._parse_guardian_entry(entry)
+    assert art is not None
+    assert art.headline == "Senate confirms Fed Chair"
+    assert art.source == "The Guardian"
+    assert "stand" in art.body and "trail" in art.body
+    assert art.categories == ["world"]
+
+
+def test_parse_guardian_entry_rejects_missing_fields():
+    eng = _make_engine()
+    assert eng._parse_guardian_entry({"webTitle": ""}) is None
+    assert eng._parse_guardian_entry({"webUrl": "https://x"}) is None
+    assert eng._parse_guardian_entry({}) is None
+
+
+# --- GDELT --------------------------------------------------------------
+
+def test_parse_gdelt_entry_basic():
+    eng = _make_engine()
+    entry = {
+        "title": "Senate confirms Fed Chair",
+        "url": "https://example.com/article",
+        "seendate": "20260430T120000Z",
+        "domain": "example.com",
+    }
+    art = eng._parse_gdelt_entry(entry)
+    assert art is not None
+    assert art.headline == "Senate confirms Fed Chair"
+    assert art.source == "GDELT/example.com"
+    assert art.published_at.year == 2026
+    assert art.published_at.month == 4
+    assert art.published_at.day == 30
+    assert art.body == ""  # GDELT doesn't include bodies
+
+
+def test_parse_gdelt_entry_handles_bad_seendate():
+    eng = _make_engine()
+    entry = {"title": "h", "url": "https://x", "seendate": "garbage"}
+    art = eng._parse_gdelt_entry(entry)
+    assert art is not None
+    # Falls back to "now"; just verify we got a recent timestamp.
+    assert (_utcnow() - art.published_at).total_seconds() < 5
+
+
+def test_parse_gdelt_entry_rejects_missing():
+    eng = _make_engine()
+    assert eng._parse_gdelt_entry({}) is None
+    assert eng._parse_gdelt_entry({"title": "x"}) is None
+
+
+# --- Marketaux ----------------------------------------------------------
+
+def test_parse_marketaux_entry_basic():
+    eng = _make_engine()
+    entry = {
+        "title": "Apple beats earnings",
+        "url": "https://example.com/aapl",
+        "published_at": "2026-04-30T12:00:00.000000Z",
+        "description": "desc",
+        "snippet": "snip",
+        "source": "Reuters",
+        "entities": [
+            {"symbol": "AAPL", "name": "Apple"},
+            {"symbol": "MSFT", "name": "Microsoft"},
+        ],
+    }
+    art = eng._parse_marketaux_entry(entry)
+    assert art is not None
+    assert art.headline == "Apple beats earnings"
+    assert art.source == "Reuters"
+    assert "AAPL" in art.categories and "MSFT" in art.categories
+    assert "desc" in art.body and "snip" in art.body
+
+
+def test_parse_marketaux_entry_rejects_missing():
+    eng = _make_engine()
+    assert eng._parse_marketaux_entry({"title": "h"}) is None
+    assert eng._parse_marketaux_entry({"url": "https://x"}) is None
+
+
+# --- Reddit -------------------------------------------------------------
+
+def test_parse_reddit_entry_link_post():
+    eng = _make_engine()
+    entry = {
+        "title": "Big news headline",
+        "url": "https://reuters.com/world/article",
+        "selftext": "",
+        "created_utc": 1719777600.0,
+        "is_self": False,
+        "over_18": False,
+    }
+    art = eng._parse_reddit_entry(entry, "worldnews")
+    assert art is not None
+    assert art.headline == "Big news headline"
+    assert art.source == "Reddit/r/worldnews"
+    assert art.url.startswith("https://reuters.com")
+    assert art.categories == ["worldnews"]
+
+
+def test_parse_reddit_entry_skips_self_post():
+    eng = _make_engine()
+    entry = {
+        "title": "ask r/worldnews question",
+        "url": "https://reddit.com/r/worldnews/comments/x",
+        "is_self": True,
+        "created_utc": 1719777600.0,
+    }
+    assert eng._parse_reddit_entry(entry, "worldnews") is None
+
+
+def test_parse_reddit_entry_skips_nsfw():
+    eng = _make_engine()
+    entry = {
+        "title": "x",
+        "url": "https://example.com/x",
+        "is_self": False,
+        "over_18": True,
+        "created_utc": 1719777600.0,
+    }
+    assert eng._parse_reddit_entry(entry, "worldnews") is None
+
+
+def test_parse_reddit_entry_skips_reddit_internal_urls():
+    eng = _make_engine()
+    entry = {
+        "title": "x",
+        "url": "https://www.reddit.com/r/worldnews/comments/abc/x",
+        "is_self": False,
+        "over_18": False,
+        "created_utc": 1719777600.0,
+    }
+    assert eng._parse_reddit_entry(entry, "worldnews") is None
+
+
+def test_parse_reddit_entry_handles_invalid_timestamp():
+    eng = _make_engine()
+    entry = {
+        "title": "x",
+        "url": "https://example.com/x",
+        "is_self": False,
+        "over_18": False,
+        "created_utc": "not_a_number",
+    }
+    art = eng._parse_reddit_entry(entry, "worldnews")
+    assert art is not None  # falls back to now
+    assert (_utcnow() - art.published_at).total_seconds() < 5
