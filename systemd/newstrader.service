@@ -1,0 +1,17 @@
+[Unit]
+Description=Polymarket News Trader Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/polymarket-news-trader
+EnvironmentFile=/home/ubuntu/polymarket-news-trader/.env
+ExecStart=/home/ubuntu/polymarket-news-trader/venv/bin/python main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
