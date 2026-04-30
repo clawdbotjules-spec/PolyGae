@@ -53,7 +53,7 @@ def _get_int(name: str, default: int) -> int:
 
 # --- Anthropic ---
 ANTHROPIC_API_KEY: Final[str] = _get_str("ANTHROPIC_API_KEY", required=True)
-CLAUDE_MODEL: Final[str] = _get_str("CLAUDE_MODEL", "claude-opus-4-5")
+CLAUDE_MODEL: Final[str] = _get_str("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 # --- Polygon / Polymarket wallet & API ---
 POLYGON_PRIVATE_KEY: Final[str] = _get_str("POLYGON_PRIVATE_KEY", required=True)

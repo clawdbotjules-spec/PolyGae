@@ -453,21 +453,32 @@ class NewsEngine:
 
     async def _run_gdelt(self) -> None:
         url = "https://api.gdeltproject.org/api/v2/doc/doc"
-        # GDELT 2.0 publishes new articles every 15 min; poll every 5 min so
-        # we get fresh data shortly after each publish window.
+        # GDELT publishes every 15 min and rate-limits to one global request
+        # per 5 seconds. Their free tier is also frequently overloaded, so
+        # we use 15 min as the baseline cadence and back off exponentially
+        # on every 429 / empty-body response.
+        base_interval = 900
+        backoff = base_interval
         while not self._stop.is_set():
             try:
-                await self._poll_gdelt(url)
+                ok = await self._poll_gdelt(url)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 log.warning("gdelt_poll_failed", error=str(e))
+                ok = False
+            if ok:
+                backoff = base_interval
+            else:
+                # Cap at 1 hour to avoid going dark
+                backoff = min(backoff * 2, 3600)
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=300)
+                await asyncio.wait_for(self._stop.wait(), timeout=backoff)
             except asyncio.TimeoutError:
                 pass
 
-    async def _poll_gdelt(self, url: str) -> None:
+    async def _poll_gdelt(self, url: str) -> bool:
+        """Returns True on success, False on rate limit / empty / non-200."""
         assert self._session is not None
         params = {
             "query": GDELT_QUERY + " sourcelang:eng",
@@ -478,19 +489,28 @@ class NewsEngine:
             "sort": "DateDesc",
         }
         async with self._session.get(url, params=params) as resp:
+            body_preview = ""
             if resp.status != 200:
                 txt = await resp.text()
-                log.warning("gdelt_non_200", status=resp.status, body=txt[:200])
-                return
-            try:
-                data = await resp.json(content_type=None)
-            except Exception as e:
-                log.warning("gdelt_invalid_json", error=str(e))
-                return
-        for entry in data.get("articles") or []:
+                body_preview = txt[:200]
+                log.warning("gdelt_non_200", status=resp.status, body=body_preview)
+                return False
+            text = await resp.text()
+        text = (text or "").strip()
+        if not text:
+            log.info("gdelt_empty_body")
+            return False
+        try:
+            data = json.loads(text)
+        except Exception as e:
+            log.warning("gdelt_invalid_json", error=str(e), body=text[:200])
+            return False
+        articles = data.get("articles") or []
+        for entry in articles:
             article = self._parse_gdelt_entry(entry)
             if article is not None:
                 await self._emit(article)
+        return True
 
     def _parse_gdelt_entry(self, entry: dict[str, Any]) -> NewsArticle | None:
         title = (entry.get("title") or "").strip()
