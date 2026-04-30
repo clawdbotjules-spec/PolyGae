@@ -151,15 +151,23 @@ class TradeLogger:
             await self._db.execute(stmt)
         await self._db.commit()
 
-        # Lazy-init Telegram (do not fail startup if unavailable)
-        try:
-            from telegram import Bot  # type: ignore
+        # Lazy-init Telegram. Only attempt to import the SDK when the user
+        # has actually configured a bot token + chat id; the import itself
+        # has heavy native deps and we don't want to pay that cost (or risk
+        # a panic in environments where it can't load) when telegram is off.
+        # BaseException is intentionally caught — pyo3 panics surface as
+        # BaseException, not Exception, in some installs.
+        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+            try:
+                from telegram import Bot  # type: ignore
 
-            if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
                 self._tg_app = Bot(token=TELEGRAM_BOT_TOKEN)
                 self._tg_ready = True
-        except Exception as e:  # pragma: no cover - best effort
-            log.warning("telegram_init_failed", error=str(e))
+            except BaseException as e:  # pragma: no cover - best effort
+                log.warning("telegram_init_failed", error=str(e))
+                self._tg_ready = False
+        else:
+            log.info("telegram_disabled", reason="no_credentials_configured")
             self._tg_ready = False
 
     async def close(self) -> None:

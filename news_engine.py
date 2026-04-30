@@ -19,7 +19,6 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 
 import aiohttp
-import feedparser  # type: ignore
 import structlog
 import websockets
 
@@ -363,6 +362,11 @@ class NewsEngine:
     # --- RSS polling ---------------------------------------------------------
 
     async def _run_rss(self) -> None:
+        try:
+            import feedparser  # type: ignore
+        except ImportError as e:
+            log.warning("rss_disabled", reason=f"feedparser unavailable: {e}")
+            return
         loop = asyncio.get_running_loop()
         while not self._stop.is_set():
             for source_name, url in _RSS_FEEDS:

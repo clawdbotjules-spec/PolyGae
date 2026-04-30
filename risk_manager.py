@@ -201,20 +201,19 @@ class RiskManager:
         p = max(min(dm.fair_value_estimate, 0.999), 0.001)
         q = 1.0 - p
         full_kelly = (b * p - q) / b if b > 0 else 0.0
+        # Negative kelly = negative EV at our own fair-value estimate; never trade.
         if full_kelly <= 0:
-            kelly_size = 0.0
-        else:
-            quarter_kelly = full_kelly * 0.25
-            kelly_size = quarter_kelly * TOTAL_CAPITAL_USDC
+            return 0.0
+        quarter_kelly = full_kelly * 0.25
+        kelly_size = quarter_kelly * TOTAL_CAPITAL_USDC
 
         recommended = float(dm.recommended_position_usdc or 0)
-        # The smallest of: kelly, claude's rec, single-bet cap. Then floor at $10.
-        candidates = [c for c in (kelly_size, recommended, MAX_SINGLE_BET_USDC) if c > 0]
-        if not candidates:
-            return 0.0
+        # If Claude doesn't give a recommended size, fall back to kelly only.
+        candidates = [c for c in (kelly_size, recommended) if c > 0]
+        candidates.append(MAX_SINGLE_BET_USDC)
         size = min(candidates)
         size = min(size, MAX_SINGLE_BET_USDC)
-        size = max(size, 10.0) if size > 0 else 0.0
+        size = max(size, 10.0)
         return round(size, 2)
 
     # ---- lifecycle hooks --------------------------------------------------

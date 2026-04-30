@@ -220,10 +220,8 @@ class ClaudeAnalyst:
         session_context: dict[str, Any],
     ) -> ClaudeDecision:
         user_msg = self._build_user_message(article, markets_snapshot, session_context)
-        attempt = 0
-        last_err: Exception | None = None
-        while attempt < 3:
-            attempt += 1
+        response = None
+        for attempt in range(1, 4):
             try:
                 response = await self.client.messages.create(
                     model=self.model,
@@ -234,25 +232,19 @@ class ClaudeAnalyst:
                 )
                 break
             except anthropic.RateLimitError as e:
-                last_err = e
                 log.warning("anthropic_rate_limit", attempt=attempt, error=str(e))
                 if attempt >= 3:
                     raise
                 await asyncio.sleep(30)
             except anthropic.APITimeoutError as e:
-                last_err = e
                 log.warning("anthropic_timeout", attempt=attempt, error=str(e))
                 if attempt >= 3:
                     raise
                 await asyncio.sleep(10)
             except anthropic.APIError as e:
-                last_err = e
                 log.error("anthropic_api_error", attempt=attempt, error=str(e))
                 raise
-
-        else:  # pragma: no cover - unreachable
-            assert last_err is not None
-            raise last_err
+        assert response is not None  # narrow type for the checker
 
         # Extract text content
         try:

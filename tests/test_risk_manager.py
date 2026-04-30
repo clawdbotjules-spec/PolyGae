@@ -223,3 +223,122 @@ def test_consecutive_losses_reset_after_win():
     assert rm.consecutive_losses == 2
     rm.record_trade_closed(_trade_result(50.0, pos_id="DRY-3", cid="0x3"))
     assert rm.consecutive_losses == 0
+
+
+def test_open_capital_cap_clamps_size_down():
+    """Even with a generous Claude rec, we should never exceed total open capital."""
+    rm = RiskManager()
+    # Fill open positions up to a remaining $40 of capacity
+    pos = OpenPosition(
+        position_id="DRY-1",
+        condition_id="0xPRE",
+        token_id="t",
+        question="other market",
+        direction="YES",
+        entry_price=0.5,
+        size_usdc=config.MAX_TOTAL_OPEN_USDC - 40.0,
+        shares=1.0,
+        exit_target_price=0.7,
+        max_hold_until=datetime.now(timezone.utc) + timedelta(hours=10),
+        opened_at=datetime.now(timezone.utc),
+        news_article_id="x",
+        order_id="o",
+    )
+    rm.open_positions[pos.position_id] = pos
+    res = rm.check_trade(_market(), _good_dm())
+    assert res.approved is True
+    assert res.adjusted_size_usdc <= 40.0
+
+
+def test_open_capital_cap_blocks_trade_when_no_room():
+    rm = RiskManager()
+    pos = OpenPosition(
+        position_id="DRY-1",
+        condition_id="0xPRE",
+        token_id="t",
+        question="m",
+        direction="YES",
+        entry_price=0.5,
+        size_usdc=config.MAX_TOTAL_OPEN_USDC,  # fully utilised
+        shares=1.0,
+        exit_target_price=0.7,
+        max_hold_until=datetime.now(timezone.utc) + timedelta(hours=10),
+        opened_at=datetime.now(timezone.utc),
+        news_article_id="x",
+        order_id="o",
+    )
+    rm.open_positions[pos.position_id] = pos
+    res = rm.check_trade(_market(cid="0xOTHER"), _good_dm("0xOTHER"))
+    assert res.approved is False
+    assert "headroom" in res.reason.lower()
+
+
+def test_negative_kelly_blocks_trade():
+    """If our fair value is below price, Kelly is negative and we must not trade.
+
+    The risk manager's edge gate normally prevents this, but verify the
+    sizing function never returns a positive size for negative-EV inputs.
+    """
+    dm = _good_dm()
+    dm.current_price = 0.80
+    dm.fair_value_estimate = 0.50  # we think the market is overpriced for YES
+    dm.edge_after_fees = 0.10  # claude lied / inconsistent
+    size = RiskManager._compute_size(dm)
+    assert size == 0.0
+
+
+def test_daily_rollover_clears_loss_state():
+    rm = RiskManager()
+    rm.daily_loss_usdc = 200.0
+    rm.daily_pnl_usdc = -200.0
+    rm.daily_trades = [_trade_result(-50.0, "DRY-x", "0x1")]
+    # Simulate the date rolling over
+    rm._daily_anchor = datetime.now(timezone.utc).date() - timedelta(days=1)  # type: ignore[assignment]
+    rm._maybe_rollover()
+    assert rm.daily_loss_usdc == 0.0
+    assert rm.daily_pnl_usdc == 0.0
+    assert rm.daily_trades == []
+
+
+def test_hourly_rate_limit_window_excludes_old_entries():
+    rm = RiskManager()
+    old = datetime.now(timezone.utc) - timedelta(hours=2)
+    recent = datetime.now(timezone.utc) - timedelta(minutes=5)
+    rm.trades_this_hour = [old] * 5 + [recent] * 2
+    rm._prune_hourly()
+    assert len(rm.trades_this_hour) == 2
+    res = rm.check_trade(_market(), _good_dm())
+    assert res.approved is True
+
+
+def test_safety_mode_blocks_then_clears_correctly():
+    rm = RiskManager()
+    rm.safety_mode_until = datetime.now(timezone.utc) + timedelta(hours=1)
+    res = rm.check_trade(_market(), _good_dm())
+    assert res.approved is False
+    rm.reset_safety_mode()
+    res = rm.check_trade(_market(), _good_dm())
+    assert res.approved is True
+
+
+def test_record_trade_opened_increments_hourly_counter():
+    rm = RiskManager()
+    pos = OpenPosition(
+        position_id="DRY-x",
+        condition_id="0xX",
+        token_id="t",
+        question="q",
+        direction="YES",
+        entry_price=0.5,
+        size_usdc=50,
+        shares=100,
+        exit_target_price=0.7,
+        max_hold_until=datetime.now(timezone.utc) + timedelta(hours=10),
+        opened_at=datetime.now(timezone.utc),
+        news_article_id="x",
+        order_id="o",
+    )
+    before = len(rm.trades_this_hour)
+    rm.record_trade_opened(pos)
+    assert len(rm.trades_this_hour) == before + 1
+    assert pos.position_id in rm.open_positions

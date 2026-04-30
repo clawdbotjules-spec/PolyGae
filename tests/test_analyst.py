@@ -124,3 +124,95 @@ def test_extract_json_object_handles_prefix_text():
 def test_extract_json_object_handles_code_fence():
     raw = "```json\n{\"a\": 1}\n```"
     assert _extract_json_object(raw).strip() == '{"a": 1}'
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_retries_then_succeeds(monkeypatch):
+    """RateLimitError on the first call should trigger a retry that succeeds."""
+    import anthropic
+
+    analyst = ClaudeAnalyst()
+    # Don't actually sleep 30s during the test
+    monkeypatch.setattr("analyst.asyncio.sleep", AsyncMock())
+
+    # First call raises RateLimitError, second call returns a valid response.
+    body = SimpleNamespace(request=SimpleNamespace())
+    rate_limit_err = anthropic.RateLimitError(
+        message="rate",
+        response=SimpleNamespace(
+            headers={}, status_code=429, request=SimpleNamespace()
+        ),
+        body=body,
+    )
+    side_effects = [rate_limit_err, _mk_response(_VALID_JSON)]
+    fake_create = AsyncMock(side_effect=side_effects)
+    with patch.object(analyst.client.messages, "create", fake_create):
+        decision = await analyst.analyze(NEWS_POLITICAL, "(no markets)", {})
+    assert decision.decision == "TRADE"
+    assert fake_create.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_gives_up_after_three_attempts(monkeypatch):
+    import anthropic
+
+    analyst = ClaudeAnalyst()
+    monkeypatch.setattr("analyst.asyncio.sleep", AsyncMock())
+    body = SimpleNamespace(request=SimpleNamespace())
+    err = anthropic.RateLimitError(
+        message="rate",
+        response=SimpleNamespace(
+            headers={}, status_code=429, request=SimpleNamespace()
+        ),
+        body=body,
+    )
+    fake_create = AsyncMock(side_effect=[err, err, err])
+    with patch.object(analyst.client.messages, "create", fake_create):
+        with pytest.raises(anthropic.RateLimitError):
+            await analyst.analyze(NEWS_POLITICAL, "(no markets)", {})
+    assert fake_create.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_api_error_does_not_retry(monkeypatch):
+    """APIError (non-rate-limit) should propagate immediately without retries."""
+    import anthropic
+
+    analyst = ClaudeAnalyst()
+    monkeypatch.setattr("analyst.asyncio.sleep", AsyncMock())
+    body = SimpleNamespace(request=SimpleNamespace())
+    err = anthropic.APIError(
+        message="server error", request=SimpleNamespace(), body=body
+    )
+    fake_create = AsyncMock(side_effect=err)
+    with patch.object(analyst.client.messages, "create", fake_create):
+        with pytest.raises(anthropic.APIError):
+            await analyst.analyze(NEWS_POLITICAL, "(no markets)", {})
+    assert fake_create.await_count == 1  # no retries
+
+
+@pytest.mark.asyncio
+async def test_user_message_includes_session_context_and_dry_run_label():
+    """The prompt sent to Claude should include news, markets, session, and DRY RUN tag."""
+    analyst = ClaudeAnalyst()
+    fake_create = AsyncMock(return_value=_mk_response(_VALID_JSON))
+    with patch.object(analyst.client.messages, "create", fake_create):
+        await analyst.analyze(
+            NEWS_POLITICAL,
+            "MARKET_LIST_HERE",
+            {
+                "session_start": "2026-04-30T12:00:00",
+                "trades_this_session": 5,
+                "already_traded": ["0xABC"],
+                "open_positions": ["Will X happen?"],
+                "daily_pnl": -42.5,
+            },
+        )
+    sent = fake_create.await_args.kwargs["messages"][0]["content"]
+    assert "MARKET_LIST_HERE" in sent
+    assert "Trades executed this session: 5" in sent
+    assert "0xABC" in sent
+    assert "Will X happen?" in sent
+    assert "-42.50" in sent
+    assert "DRY RUN" in sent  # config.DRY_RUN=true in tests
+    assert NEWS_POLITICAL.headline in sent
